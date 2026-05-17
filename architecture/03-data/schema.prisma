@@ -1,0 +1,32 @@
+// Ai Маркетолог — schema.prisma
+// MVP (Фаза 1): база данных не используется.
+// Состояния хранятся в MemoryStorage (aiogram FSM).
+// Фаза 2: PostgreSQL для пользователей и истории генераций.
+// Фаза 3: хранение CardResult, аналитики.
+
+// generator client {
+//   provider = "prisma-client-py"
+// }
+// 
+// datasource db {
+//   provider = "postgresql"
+//   url      = env("DATABASE_URL")
+// }
+// 
+// model User {
+//   id             Int       @id @default(autoincrement())
+//   telegram_id    BigInt    @unique
+//   created_at     DateTime  @default(now())
+//   generations    Int       @default(0)
+//   plan           String    @default("free")
+//   CardHistory    CardHistory[]
+// }
+// 
+// model CardHistory {
+//   id                  Int       @id @default(autoincrement())
+//   user_id             Int
+//   user                User      @relation(fields: [user_id], references: [id])
+//   product_description String
+//   result_json         String    // CardResult as JSON
+//   created_at          DateTime  @default(now())
+// }
