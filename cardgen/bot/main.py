@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import os
 import sys
 
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
 
-from cardgen.bot.handlers import router
+from cardgen.bot.handlers import router, set_storage
+from cardgen.bot.rate_limiter import RateLimitMiddleware, RateLimiter
+from cardgen.bot.storage import SQLiteStorage
 from cardgen.config import settings
 
 
@@ -16,15 +18,28 @@ async def main() -> None:
         stream=sys.stdout,
     )
 
+    dirname = os.path.dirname(settings.SQLITE_PATH)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
+    storage = SQLiteStorage(settings.SQLITE_PATH, fsm_ttl=settings.FSM_STATE_TTL)
+    set_storage(storage)
+
     bot = Bot(token=settings.BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=storage)
     dp.include_router(router)
+
+    rate_limiter = RateLimiter(
+        max_requests=settings.RATE_LIMIT_MAX,
+        window_seconds=settings.RATE_LIMIT_WINDOW,
+    )
+    dp.message.middleware(RateLimitMiddleware(rate_limiter))
 
     logging.info("Bot started")
     try:
         await dp.start_polling(bot)
     finally:
         logging.info("Bot stopped")
+        await storage.close()
         await bot.session.close()
 
 

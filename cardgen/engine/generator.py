@@ -59,20 +59,23 @@ def _strict_json_instruction(strict: bool) -> str:
 
 async def call_openrouter(prompt: str, max_tokens: int, strict_json: bool = False) -> str:
     async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT) as client:
+        request_body: dict = {
+            "model": settings.OPENROUTER_MODEL,
+            "messages": [
+                {"role": "user", "content": prompt + _strict_json_instruction(strict_json)}
+            ],
+            "max_tokens": max_tokens,
+        }
+        if strict_json:
+            request_body["response_format"] = {"type": "json_object"}
+
         response = await client.post(
             settings.OPENROUTER_BASE_URL,
             headers={
                 "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": settings.OPENROUTER_MODEL,
-                "messages": [
-                    {"role": "user", "content": prompt + _strict_json_instruction(strict_json)}
-                ],
-                "max_tokens": max_tokens,
-                "response_format": {"type": "json_object"},
-            },
+            json=request_body,
         )
         response.raise_for_status()
         data = response.json()
@@ -208,10 +211,13 @@ async def analyze_competitor(
 
     category_name = get_category_name(my_category)
 
+    safe_description = my_description.replace("{", "{{").replace("}", "}}")
+    safe_competitor = truncated.replace("{", "{{").replace("}", "}}")
+
     prompt = COMPETITOR_PROMPT_TEMPLATE.format(
-        my_description=my_description,
+        my_description=safe_description,
         my_category=category_name,
-        competitor_text=truncated,
+        competitor_text=safe_competitor,
     )
 
     try:

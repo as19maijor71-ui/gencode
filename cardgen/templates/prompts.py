@@ -89,10 +89,12 @@ def build_prompt(
     if category_fields is None:
         category_fields = get_category_fields(category_key)
 
+    safe_description = description.replace("{", "{{").replace("}", "}}")
+
     fields_formatted = "\n".join(f"- {f}" for f in category_fields)
 
     return PROMPT_TEMPLATE.format(
-        description=description,
+        description=safe_description,
         category_name=get_category_name(category_key),
         target_audience=target_audience,
         brand=brand,

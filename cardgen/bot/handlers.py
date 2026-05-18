@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import time
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -10,8 +11,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from cardgen.bot.keyboards import category_keyboard, competitor_keyboard, confirm_keyboard, start_keyboard
+from cardgen.bot.storage import SQLiteStorage
 from cardgen.config import settings
-from cardgen.engine.generator import CardResult, analyze_competitor, format_for_copy, generate_card, split_by_sections
+from cardgen.engine.generator import CardResult, COMPETITOR_MIN_LENGTH, analyze_competitor, format_for_copy, generate_card, split_by_sections
+from cardgen.engine.url_fetcher import detect_platform, extract_product_text, fetch_product_page
 from cardgen.templates.categories import (
     detect_category,
     get_category_emoji,
@@ -26,24 +29,22 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LENGTH = 4096
 
-_copy_cache: dict[str, str] = {}
-_copy_counter = 0
-_COPY_CACHE_MAX = 1000
+_storage_instance: SQLiteStorage | None = None
 
 
-def _store_copy(text: str) -> str:
-    global _copy_counter
-    _copy_counter += 1
-    key = str(_copy_counter)
-    if len(_copy_cache) >= _COPY_CACHE_MAX:
-        oldest = next(iter(_copy_cache))
-        del _copy_cache[oldest]
-    _copy_cache[key] = text
+def set_storage(storage: SQLiteStorage) -> None:
+    global _storage_instance
+    _storage_instance = storage
+
+
+def _store_copy(storage: SQLiteStorage, text: str, user_id: int) -> str:
+    key = f"{user_id}:{int(time.time_ns())}"
+    storage.put_copy(key, text)
     return key
 
 
-def _get_copy(key: str) -> str | None:
-    return _copy_cache.pop(key, None)
+def _get_copy(storage: SQLiteStorage, key: str) -> str | None:
+    return storage.get_copy(key)
 
 
 class CardFlow(StatesGroup):
@@ -75,6 +76,11 @@ def _safe_send(text: str) -> list[str]:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    if current_state == CardFlow.generating:
+        await message.answer("⏳ Генерация уже идёт. Подожди, пожалуйста.")
+        return
+
     await state.clear()
     await message.answer(
         "👋 Привет! Я — AI-маркетолог.\n\n"
@@ -112,6 +118,11 @@ async def category_chosen(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(F.text == "🔄 Начать заново")
 async def restart(message: Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    if current_state == CardFlow.generating:
+        await message.answer("⏳ Генерация уже идёт. Подожди, пожалуйста.")
+        return
+
     await state.clear()
     await message.answer(
         "Выбери категорию товара:",
@@ -188,9 +199,8 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.answer(
         f"🎯 <b>Конкурентный анализ</b>\n\n"
         f"Хочешь обойти конкурента в категории <b>{_escape(name)}</b>?\n\n"
-        "Скопируй текст его карточки (заголовок + описание + характеристики) "
-        "или нажми <b>Пропустить</b>.\n\n"
-        "⚠️ Убедись, что конкурент из той же категории.",
+        "Отправь URL карточки WB или Ozon — или скопируй текст вручную.\n"
+        "Или нажми <b>Пропустить</b>.",
         reply_markup=competitor_keyboard(),
         parse_mode="HTML",
     )
@@ -203,7 +213,7 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext) -> None:
 async def competitor_skip(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
-    await _do_generate(callback.message, state, competitor_text="")
+    await _do_generate(callback.message, state, competitor_input="", user_id=callback.from_user.id)
 
 
 @router.message(CardFlow.competitor_input)
@@ -213,6 +223,17 @@ async def competitor_text_input(message: Message, state: FSMContext) -> None:
         return
 
     text = message.text.strip()
+
+    if text.startswith("http"):
+        platform = detect_platform(text)
+        if platform is not None:
+            await message.answer("🔗 Анализирую карточку конкурента по ссылке...")
+            await _do_generate(message, state, competitor_input=text, user_id=message.from_user.id)
+            return
+        await message.answer(
+            "❌ Это не ссылка на товар WB или Ozon. Скопируй URL из адресной строки."
+        )
+        return
 
     if len(text) < 50:
         await message.answer(
@@ -228,13 +249,23 @@ async def competitor_text_input(message: Message, state: FSMContext) -> None:
         )
         return
 
-    await _do_generate(message, state, competitor_text=text)
+    await _do_generate(message, state, competitor_input=text, user_id=message.from_user.id)
 
 
-async def _do_generate(message: Message, state: FSMContext, competitor_text: str) -> None:
+async def _do_generate(message: Message, state: FSMContext, competitor_input: str, user_id: int) -> None:
     data = await state.get_data()
     description: str = data.get("description", "")
     category_key: str = data.get("category", "clothing")
+
+    if not description:
+        await message.answer("⚠️ Описание товара не найдено. Начни заново: /start")
+        await state.clear()
+        return
+
+    old_key = data.get("active_copy_key")
+    if old_key and _storage_instance is not None:
+        _storage_instance.get_copy(old_key)
+    await state.update_data(active_copy_key=None)
 
     await state.set_state(CardFlow.generating)
     thinking_msg = await message.answer(
@@ -243,11 +274,29 @@ async def _do_generate(message: Message, state: FSMContext, competitor_text: str
 
     animation_task = asyncio.create_task(_animate_thinking(thinking_msg))
 
+    platform = detect_platform(competitor_input) if competitor_input else None
+    competitor_analysis: str = ""
+    url_failed = False
+
     try:
-        if competitor_text:
+        if platform:
             results = await asyncio.gather(
                 generate_card(description=description, category_key=category_key),
-                analyze_competitor(description, category_key, competitor_text),
+                _fetch_and_analyze(competitor_input, description, category_key),
+                return_exceptions=True,
+            )
+            result, competitor_analysis = results
+            if isinstance(result, Exception):
+                raise result
+            if isinstance(competitor_analysis, Exception):
+                competitor_analysis = ""
+                url_failed = True
+            elif not competitor_analysis:
+                url_failed = True
+        elif competitor_input:
+            results = await asyncio.gather(
+                generate_card(description=description, category_key=category_key),
+                analyze_competitor(description, category_key, competitor_input),
                 return_exceptions=True,
             )
             result, competitor_analysis = results
@@ -260,7 +309,6 @@ async def _do_generate(message: Message, state: FSMContext, competitor_text: str
                 description=description,
                 category_key=category_key,
             )
-            competitor_analysis = ""
     except Exception as e:
         animation_task.cancel()
         await thinking_msg.edit_text(f"❌ Ошибка при генерации: {_escape(str(e))}")
@@ -275,18 +323,38 @@ async def _do_generate(message: Message, state: FSMContext, competitor_text: str
 
     await send_results(message, result, competitor_analysis=competitor_analysis)
 
+    if url_failed:
+        await message.answer("⚠️ Не удалось загрузить карточку. Генерирую без анализа.")
+
     copy_text = format_for_copy(result, competitor_analysis)
-    copy_key = _store_copy(copy_text)
-    copy_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📋 Копировать всё", callback_data=f"copy:{copy_key}")
-    ]])
-    await message.answer("📋 Нажми, чтобы скопировать всю карточку одним сообщением:", reply_markup=copy_kb)
+    if _storage_instance is not None:
+        copy_key = _store_copy(_storage_instance, copy_text, user_id)
+        await state.update_data(active_copy_key=copy_key)
+        copy_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📋 Копировать всё", callback_data=f"copy:{copy_key}")
+        ]])
+        await message.answer("📋 Нажми, чтобы скопировать всю карточку одним сообщением:", reply_markup=copy_kb)
 
     await message.answer(
         "✅ Готово! Выбери категорию для следующего товара:",
         reply_markup=category_keyboard(),
     )
     await state.set_state(CardFlow.category_select)
+
+
+async def _fetch_and_analyze(url: str, description: str, category_key: str) -> str:
+    try:
+        platform = detect_platform(url)
+        if not platform:
+            return ""
+        html = await fetch_product_page(url)
+        text = extract_product_text(html, platform)
+        if not text or len(text) < COMPETITOR_MIN_LENGTH:
+            return ""
+        return await analyze_competitor(description, category_key, text)
+    except Exception as e:
+        logger.warning(f"URL fetch/analyze failed: {e}")
+        return ""
 
 
 @router.callback_query(F.data == "confirm:no", CardFlow.confirm)
@@ -303,7 +371,10 @@ async def confirm_no(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("copy:"))
 async def copy_all(callback: CallbackQuery) -> None:
     key = callback.data.split(":", 1)[1]
-    text = _get_copy(key)
+    if _storage_instance is None:
+        await callback.answer("⚠️ Данные устарели. Сгенерируй заново.", show_alert=True)
+        return
+    text = _get_copy(_storage_instance, key)
 
     if text is None:
         await callback.answer("⚠️ Данные устарели. Сгенерируй заново.", show_alert=True)
@@ -318,6 +389,16 @@ async def copy_all(callback: CallbackQuery) -> None:
         except Exception as e:
             logger.warning(f"Failed to send copy chunk: {e}")
             break
+
+    await callback.message.answer(
+        "📋 <b>Выдели текст выше и скопируй.</b>\n"
+        "На десктопе: зажми левую кнопку мыши и протяни по тексту → Ctrl+C.\n"
+        "На телефоне: нажми на сообщение и удерживай → «Копировать».\n\n"
+        "Затем вставь в карточку товара на WB или Ozon.\n\n"
+        "Готово! Выбери категорию для следующего товара:",
+        reply_markup=category_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 async def _animate_thinking(msg: Message) -> None:
@@ -353,7 +434,11 @@ async def send_results(message: Message, result: CardResult, competitor_analysis
         f"<b>Ключевые слова:</b>\n{_escape(', '.join(result.wb_keywords)) if result.wb_keywords else '—'}"
     )
     for chunk in _safe_send(wb_text):
-        await message.answer(chunk, parse_mode="HTML")
+        try:
+            await message.answer(chunk, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Failed to send WB chunk with HTML: {e}")
+            await message.answer(_escape(chunk))
 
     # Message 2: Ozon
     ozon_text = (
@@ -363,7 +448,11 @@ async def send_results(message: Message, result: CardResult, competitor_analysis
         f"<b>Ключевые слова:</b>\n{_escape(', '.join(result.ozon_keywords)) if result.ozon_keywords else '—'}"
     )
     for chunk in _safe_send(ozon_text):
-        await message.answer(chunk, parse_mode="HTML")
+        try:
+            await message.answer(chunk, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Failed to send Ozon chunk with HTML: {e}")
+            await message.answer(_escape(chunk))
 
     # Message 3: Video script for Ozon
     video_text = (
@@ -371,7 +460,11 @@ async def send_results(message: Message, result: CardResult, competitor_analysis
         f"{_escape(result.ozon_video_script) or '—'}"
     )
     for chunk in _safe_send(video_text):
-        await message.answer(chunk, parse_mode="HTML")
+        try:
+            await message.answer(chunk, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Failed to send video chunk with HTML: {e}")
+            await message.answer(_escape(chunk))
 
     # Message 4: Characteristics + Photo recommendations
     chars = (
@@ -387,7 +480,11 @@ async def send_results(message: Message, result: CardResult, competitor_analysis
         f"🔵 <b>Ozon:</b>\n{_escape(result.ozon_photo_recommendations) or '—'}"
     )
     for chunk in _safe_send(photos_text):
-        await message.answer(chunk, parse_mode="HTML")
+        try:
+            await message.answer(chunk, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Failed to send photos chunk with HTML: {e}")
+            await message.answer(_escape(chunk))
 
     # Message 5: Strategy notes
     strategy_text = (
@@ -395,7 +492,11 @@ async def send_results(message: Message, result: CardResult, competitor_analysis
         f"{_escape(result.strategy_notes) or '—'}"
     )
     for chunk in _safe_send(strategy_text):
-        await message.answer(chunk, parse_mode="HTML")
+        try:
+            await message.answer(chunk, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Failed to send strategy chunk with HTML: {e}")
+            await message.answer(_escape(chunk))
 
     # Message 6: Competitor analysis (optional)
     if competitor_analysis:
@@ -404,4 +505,8 @@ async def send_results(message: Message, result: CardResult, competitor_analysis
             f"{_escape(competitor_analysis)}"
         )
         for chunk in _safe_send(comp_text):
-            await message.answer(chunk, parse_mode="HTML")
+            try:
+                await message.answer(chunk, parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"Failed to send competitor chunk with HTML: {e}")
+                await message.answer(_escape(chunk))

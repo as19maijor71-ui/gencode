@@ -25,5 +25,13 @@ class Settings(BaseSettings):
     DEFAULT_MAX_TOKENS: int = 4096
     REQUEST_TIMEOUT: int = 120
 
+    SQLITE_PATH: str = "cardgen/data/bot.db"
+    FSM_STATE_TTL: int = 86400
+
+    COMPETITOR_FETCH_TIMEOUT: int = 5
+
+    RATE_LIMIT_MAX: int = 3
+    RATE_LIMIT_WINDOW: int = 60
+
 
 settings = Settings()
