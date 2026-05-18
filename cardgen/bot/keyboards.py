@@ -28,3 +28,10 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
     builder.add(InlineKeyboardButton(text="🔄 Выбрать другую категорию", callback_data="confirm:no"))
     builder.adjust(1)
     return builder.as_markup()
+
+
+def competitor_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="⏭ Пропустить", callback_data="competitor:skip"))
+    builder.adjust(1)
+    return builder.as_markup()

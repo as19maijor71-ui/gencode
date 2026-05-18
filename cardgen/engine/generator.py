@@ -6,7 +6,8 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from cardgen.config import settings
-from cardgen.templates.prompts import build_prompt
+from cardgen.templates.categories import get_category_name
+from cardgen.templates.prompts import build_prompt, COMPETITOR_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -190,3 +191,124 @@ async def generate_card(
         strategy_notes="",
         raw_response=last_raw,
     )
+
+
+COMPETITOR_MIN_LENGTH = 50
+
+
+async def analyze_competitor(
+    my_description: str,
+    my_category: str,
+    competitor_text: str,
+) -> str:
+    if len(competitor_text) < COMPETITOR_MIN_LENGTH:
+        return ""
+
+    truncated = competitor_text[:settings.COMPETITOR_MAX_LENGTH]
+
+    category_name = get_category_name(my_category)
+
+    prompt = COMPETITOR_PROMPT_TEMPLATE.format(
+        my_description=my_description,
+        my_category=category_name,
+        competitor_text=truncated,
+    )
+
+    try:
+        raw = await call_ai(prompt, strict_json=False)
+    except Exception as e:
+        logger.warning(f"Competitor analysis AI call failed: {e}")
+        return ""
+
+    if not raw or len(raw.strip()) < 50:
+        return ""
+
+    return raw.strip()
+
+
+def format_for_copy(result: CardResult, competitor_analysis: str = "") -> str:
+    parts: list[str] = []
+
+    parts.append("=== WILDBERRIES ===")
+    parts.append(f"Заголовок: {result.wb_title or '—'}")
+    parts.append(f"Описание: {result.wb_description or '—'}")
+    parts.append(f"Ключевые слова: {', '.join(result.wb_keywords) if result.wb_keywords else '—'}")
+
+    parts.append("")
+    parts.append("=== OZON ===")
+    parts.append(f"Заголовок: {result.ozon_title or '—'}")
+    parts.append(f"Описание: {result.ozon_description or '—'}")
+    parts.append(f"Ключевые слова: {', '.join(result.ozon_keywords) if result.ozon_keywords else '—'}")
+
+    parts.append("")
+    parts.append("=== СЦЕНАРИЙ ВИДЕО OZON ===")
+    parts.append(result.ozon_video_script or "—")
+
+    parts.append("")
+    parts.append("=== ХАРАКТЕРИСТИКИ ===")
+    if result.characteristics:
+        for k, v in result.characteristics.items():
+            parts.append(f"{k}: {v}")
+    else:
+        parts.append("—")
+
+    parts.append("")
+    parts.append("=== РЕКОМЕНДАЦИИ ПО ФОТО ===")
+    parts.append(f"WB: {result.wb_photo_recommendations or '—'}")
+    parts.append(f"Ozon: {result.ozon_photo_recommendations or '—'}")
+
+    parts.append("")
+    parts.append("=== СТРАТЕГИЯ ===")
+    parts.append(result.strategy_notes or "—")
+
+    if competitor_analysis:
+        parts.append("")
+        parts.append("=== КАК ОБОЙТИ КОНКУРЕНТА ===")
+        parts.append(competitor_analysis)
+
+    return "\n".join(parts)
+
+
+def split_by_sections(text: str, max_len: int = 4096) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+
+    raw_sections = re.split(r"\n(?====)", text)
+
+    chunks: list[str] = []
+    current = ""
+
+    for section in raw_sections:
+        if not current:
+            current = section
+        elif len(current) + len(section) + 1 <= max_len:
+            current += "\n" + section
+        else:
+            chunks.append(current)
+            current = section
+
+    if current:
+        if len(current) <= max_len:
+            chunks.append(current)
+        else:
+            lines = current.split("\n")
+            sub = ""
+            for line in lines:
+                if len(line) > max_len:
+                    if sub:
+                        chunks.append(sub)
+                        sub = ""
+                    for i in range(0, len(line), max_len):
+                        chunks.append(line[i : i + max_len])
+                    continue
+
+                candidate = sub + "\n" + line if sub else line
+                if len(candidate) > max_len:
+                    chunks.append(sub)
+                    sub = line
+                else:
+                    sub = candidate
+            if sub:
+                chunks.append(sub)
+
+    return chunks

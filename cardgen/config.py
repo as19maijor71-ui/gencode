@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     PROXY_URL: str = ""
 
     MAX_INPUT_LENGTH: int = 2000
+    COMPETITOR_MAX_LENGTH: int = 3000
     MAX_RETRIES: int = 1
     DEFAULT_MAX_TOKENS: int = 4096
     REQUEST_TIMEOUT: int = 120

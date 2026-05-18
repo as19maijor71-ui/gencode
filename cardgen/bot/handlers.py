@@ -1,16 +1,17 @@
 import asyncio
 import html
+import logging
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from cardgen.bot.keyboards import category_keyboard, confirm_keyboard, start_keyboard
+from cardgen.bot.keyboards import category_keyboard, competitor_keyboard, confirm_keyboard, start_keyboard
 from cardgen.config import settings
-from cardgen.engine.generator import CardResult, generate_card
+from cardgen.engine.generator import CardResult, analyze_competitor, format_for_copy, generate_card, split_by_sections
 from cardgen.templates.categories import (
     detect_category,
     get_category_emoji,
@@ -21,13 +22,35 @@ from cardgen.templates.categories import (
 
 router = Router()
 
+logger = logging.getLogger(__name__)
+
 TELEGRAM_MAX_LENGTH = 4096
+
+_copy_cache: dict[str, str] = {}
+_copy_counter = 0
+_COPY_CACHE_MAX = 1000
+
+
+def _store_copy(text: str) -> str:
+    global _copy_counter
+    _copy_counter += 1
+    key = str(_copy_counter)
+    if len(_copy_cache) >= _COPY_CACHE_MAX:
+        oldest = next(iter(_copy_cache))
+        del _copy_cache[oldest]
+    _copy_cache[key] = text
+    return key
+
+
+def _get_copy(key: str) -> str | None:
+    return _copy_cache.pop(key, None)
 
 
 class CardFlow(StatesGroup):
     category_select = State()
     product_input = State()
     confirm = State()
+    competitor_input = State()
     generating = State()
 
 
@@ -161,16 +184,83 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
 
+    name = get_category_name(category_key)
+    await callback.message.answer(
+        f"🎯 <b>Конкурентный анализ</b>\n\n"
+        f"Хочешь обойти конкурента в категории <b>{_escape(name)}</b>?\n\n"
+        "Скопируй текст его карточки (заголовок + описание + характеристики) "
+        "или нажми <b>Пропустить</b>.\n\n"
+        "⚠️ Убедись, что конкурент из той же категории.",
+        reply_markup=competitor_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(CardFlow.competitor_input)
+
+    await state.update_data(competitor_text="")
+
+
+@router.callback_query(F.data == "competitor:skip", CardFlow.competitor_input)
+async def competitor_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer()
+    await _do_generate(callback.message, state, competitor_text="")
+
+
+@router.message(CardFlow.competitor_input)
+async def competitor_text_input(message: Message, state: FSMContext) -> None:
+    if not message.text:
+        await message.answer("Отправь текст карточки конкурента или нажми «Пропустить».")
+        return
+
+    text = message.text.strip()
+
+    if len(text) < 50:
+        await message.answer(
+            "Слишком мало текста. Скопируй заголовок, описание и характеристики конкурента "
+            "(минимум 50 символов)."
+        )
+        return
+
+    if len(text) > settings.COMPETITOR_MAX_LENGTH:
+        await message.answer(
+            f"Текст слишком длинный ({len(text)} символов). Максимум {settings.COMPETITOR_MAX_LENGTH} символов. "
+            "Сократи и отправь снова."
+        )
+        return
+
+    await _do_generate(message, state, competitor_text=text)
+
+
+async def _do_generate(message: Message, state: FSMContext, competitor_text: str) -> None:
+    data = await state.get_data()
+    description: str = data.get("description", "")
+    category_key: str = data.get("category", "clothing")
+
     await state.set_state(CardFlow.generating)
-    thinking_msg = await callback.message.answer("🔍 Анализирую товар...\n\nЭто может занять несколько минут.\nНе закрывайте чат.")
+    thinking_msg = await message.answer(
+        "🔍 Анализирую товар...\n\nЭто может занять несколько минут.\nНе закрывайте чат."
+    )
 
     animation_task = asyncio.create_task(_animate_thinking(thinking_msg))
 
     try:
-        result = await generate_card(
-            description=description,
-            category_key=category_key,
-        )
+        if competitor_text:
+            results = await asyncio.gather(
+                generate_card(description=description, category_key=category_key),
+                analyze_competitor(description, category_key, competitor_text),
+                return_exceptions=True,
+            )
+            result, competitor_analysis = results
+            if isinstance(result, Exception):
+                raise result
+            if isinstance(competitor_analysis, Exception):
+                competitor_analysis = ""
+        else:
+            result = await generate_card(
+                description=description,
+                category_key=category_key,
+            )
+            competitor_analysis = ""
     except Exception as e:
         animation_task.cancel()
         await thinking_msg.edit_text(f"❌ Ошибка при генерации: {_escape(str(e))}")
@@ -183,8 +273,16 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
 
-    await send_results(callback.message, result)
-    await callback.message.answer(
+    await send_results(message, result, competitor_analysis=competitor_analysis)
+
+    copy_text = format_for_copy(result, competitor_analysis)
+    copy_key = _store_copy(copy_text)
+    copy_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📋 Копировать всё", callback_data=f"copy:{copy_key}")
+    ]])
+    await message.answer("📋 Нажми, чтобы скопировать всю карточку одним сообщением:", reply_markup=copy_kb)
+
+    await message.answer(
         "✅ Готово! Выбери категорию для следующего товара:",
         reply_markup=category_keyboard(),
     )
@@ -200,6 +298,26 @@ async def confirm_no(callback: CallbackQuery, state: FSMContext) -> None:
         reply_markup=category_keyboard(),
     )
     await state.set_state(CardFlow.category_select)
+
+
+@router.callback_query(F.data.startswith("copy:"))
+async def copy_all(callback: CallbackQuery) -> None:
+    key = callback.data.split(":", 1)[1]
+    text = _get_copy(key)
+
+    if text is None:
+        await callback.answer("⚠️ Данные устарели. Сгенерируй заново.", show_alert=True)
+        return
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer()
+
+    for chunk in split_by_sections(text):
+        try:
+            await callback.message.answer(chunk)
+        except Exception as e:
+            logger.warning(f"Failed to send copy chunk: {e}")
+            break
 
 
 async def _animate_thinking(msg: Message) -> None:
@@ -226,7 +344,7 @@ async def _animate_thinking(msg: Message) -> None:
         pass
 
 
-async def send_results(message: Message, result: CardResult) -> None:
+async def send_results(message: Message, result: CardResult, competitor_analysis: str = "") -> None:
     # Message 1: WB
     wb_text = (
         "🟣 <b>Wildberries</b>\n\n"
@@ -278,3 +396,12 @@ async def send_results(message: Message, result: CardResult) -> None:
     )
     for chunk in _safe_send(strategy_text):
         await message.answer(chunk, parse_mode="HTML")
+
+    # Message 6: Competitor analysis (optional)
+    if competitor_analysis:
+        comp_text = (
+            "🕵️ <b>Как обойти конкурента</b>\n\n"
+            f"{_escape(competitor_analysis)}"
+        )
+        for chunk in _safe_send(comp_text):
+            await message.answer(chunk, parse_mode="HTML")
