@@ -86,7 +86,12 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
     whitelist = _parse_whitelist()
     if whitelist and message.from_user.id not in whitelist:
-        await message.answer("🔒 Доступ ограничен. Бот в закрытом тестировании.")
+        await message.answer(
+            f"🔒 Бот в закрытом тестировании.\n\n"
+            f"Твой Telegram ID: <code>{message.from_user.id}</code>\n\n"
+            f"Передай его администратору, чтобы получить доступ.",
+            parse_mode="HTML",
+        )
         return
 
     current_state = await state.get_state()
