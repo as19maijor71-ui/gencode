@@ -9,9 +9,10 @@ logger = logging.getLogger(__name__)
 
 
 class SQLiteStorage(BaseStorage):
-    def __init__(self, db_path: str, fsm_ttl: int = 86400) -> None:
+    def __init__(self, db_path: str, fsm_ttl: int = 86400, admin_id: int = 0) -> None:
         self.db_path = db_path
         self.fsm_ttl = fsm_ttl
+        self.admin_id = admin_id
         self._conn: sqlite3.Connection | None = None
         self._init_db()
 
@@ -54,11 +55,25 @@ class SQLiteStorage(BaseStorage):
             ")"
         )
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS whitelist ("
+            "user_id INTEGER PRIMARY KEY, "
+            "username TEXT, "
+            "approved_by INTEGER, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now'))"
+            ")"
+        )
+        conn.execute(
             f"DELETE FROM fsm_states WHERE updated_at < datetime('now', '-{self.fsm_ttl} seconds')"
         )
         conn.execute(
             "DELETE FROM copy_cache WHERE created_at < datetime('now', '-1 hour')"
         )
+        if self.admin_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO whitelist (user_id, username, approved_by) "
+                "VALUES (?, ?, ?)",
+                (self.admin_id, "admin", self.admin_id),
+            )
         conn.commit()
         logger.info("SQLiteStorage initialized at %s", self.db_path)
 
@@ -142,6 +157,27 @@ class SQLiteStorage(BaseStorage):
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def is_whitelisted(self, user_id: int) -> bool:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row is not None
+
+    def add_to_whitelist(self, user_id: int, username: str, approved_by: int) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO whitelist (user_id, username, approved_by) "
+            "VALUES (?, ?, ?)",
+            (user_id, username, approved_by),
+        )
+        conn.commit()
+
+    def remove_from_whitelist(self, user_id: int) -> None:
+        conn = self._get_conn()
+        conn.execute("DELETE FROM whitelist WHERE user_id = ?", (user_id,))
+        conn.commit()
 
     def put_copy(self, key: str, text: str) -> None:
         conn = self._get_conn()

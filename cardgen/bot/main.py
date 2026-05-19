@@ -21,7 +21,7 @@ async def main() -> None:
     dirname = os.path.dirname(settings.SQLITE_PATH)
     if dirname:
         os.makedirs(dirname, exist_ok=True)
-    storage = SQLiteStorage(settings.SQLITE_PATH, fsm_ttl=settings.FSM_STATE_TTL)
+    storage = SQLiteStorage(settings.SQLITE_PATH, fsm_ttl=settings.FSM_STATE_TTL, admin_id=settings.ADMIN_USER_ID)
     set_storage(storage)
 
     bot = Bot(token=settings.BOT_TOKEN)

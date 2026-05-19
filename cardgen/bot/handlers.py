@@ -29,12 +29,6 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LENGTH = 4096
 
-def _parse_whitelist() -> set[int]:
-    raw = settings.WHITELIST_USERS.strip()
-    if not raw:
-        return set()
-    return {int(uid.strip()) for uid in raw.split(",") if uid.strip().isdigit()}
-
 _storage_instance: SQLiteStorage | None = None
 
 
@@ -84,12 +78,20 @@ def _safe_send(text: str) -> list[str]:
 async def cmd_start(message: Message, state: FSMContext) -> None:
     logger.info("User %d (@%s) started the bot", message.from_user.id, message.from_user.username or "?")
 
-    whitelist = _parse_whitelist()
-    if whitelist and message.from_user.id not in whitelist:
+    if _storage_instance is not None and not _storage_instance.is_whitelisted(message.from_user.id):
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="📩 Запросить доступ",
+                    callback_data=f"wl_req:{message.from_user.id}"
+                )]
+            ]
+        )
         await message.answer(
-            f"🔒 Бот в закрытом тестировании.\n\n"
+            "🔒 Бот в закрытом тестировании.\n\n"
             f"Твой Telegram ID: <code>{message.from_user.id}</code>\n\n"
-            f"Передай его администратору, чтобы получить доступ.",
+            "Нажми кнопку ниже, чтобы запросить доступ.",
+            reply_markup=keyboard,
             parse_mode="HTML",
         )
         return
@@ -584,3 +586,123 @@ async def cmd_stats(message: Message) -> None:
         lines.append(f"   Категории: {', '.join(cats[:5])}")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("wl_req:"))
+async def access_request(callback: CallbackQuery) -> None:
+    if _storage_instance is None:
+        await callback.answer("⚠️ Ошибка хранилища")
+        return
+
+    user_id_str = callback.data.split(":", 1)[1]
+    if not user_id_str.isdigit():
+        await callback.answer("⚠️ Некорректный ID")
+        return
+
+    user_id = int(user_id_str)
+    username = callback.from_user.username or ""
+    full_name = callback.from_user.full_name or ""
+
+    admin_id = settings.ADMIN_USER_ID
+    if not admin_id:
+        await callback.answer("⚠️ Администратор не настроен")
+        return
+
+    admin_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Одобрить",
+                    callback_data=f"wl_approve:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"wl_reject:{user_id}"
+                ),
+            ]
+        ]
+    )
+
+    try:
+        await callback.bot.send_message(
+            admin_id,
+            f"📩 <b>Запрос доступа</b>\n\n"
+            f"👤 {full_name}\n"
+            f"🆔 <code>{user_id}</code>\n"
+            f"{'📛 @' + username if username else '📛 username скрыт'}",
+            reply_markup=admin_kb,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to notify admin about access request: {e}")
+        await callback.answer("⚠️ Не удалось отправить запрос")
+        return
+
+    await callback.message.edit_text(
+        f"🔒 Бот в закрытом тестировании.\n\n"
+        f"✅ Запрос отправлен. Ожидай одобрения.\n\n"
+        f"Твой Telegram ID: <code>{user_id}</code>",
+        parse_mode="HTML",
+    )
+    await callback.answer("✅ Запрос отправлен")
+
+
+@router.callback_query(F.data.startswith("wl_approve:"))
+async def approve_access(callback: CallbackQuery) -> None:
+    if _storage_instance is None or settings.ADMIN_USER_ID != callback.from_user.id:
+        await callback.answer("⛔ Нет прав")
+        return
+
+    user_id_str = callback.data.split(":", 1)[1]
+    if not user_id_str.isdigit():
+        await callback.answer("⚠️ Некорректный ID")
+        return
+
+    user_id = int(user_id_str)
+    _storage_instance.add_to_whitelist(
+        user_id,
+        callback.from_user.username or "",
+        callback.from_user.id,
+    )
+
+    await callback.message.edit_text(
+        callback.message.html_text + "\n\n✅ <b>Одобрено</b>",
+        parse_mode="HTML",
+    )
+
+    try:
+        await callback.bot.send_message(
+            user_id,
+            "✅ <b>Доступ открыт!</b>\n\nНапиши /start чтобы начать.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to notify user {user_id} about approval: {e}")
+
+    await callback.answer("✅ Доступ открыт")
+
+
+@router.callback_query(F.data.startswith("wl_reject:"))
+async def reject_access(callback: CallbackQuery) -> None:
+    if _storage_instance is None or settings.ADMIN_USER_ID != callback.from_user.id:
+        await callback.answer("⛔ Нет прав")
+        return
+
+    user_id_str = callback.data.split(":", 1)[1]
+    if not user_id_str.isdigit():
+        await callback.answer("⚠️ Некорректный ID")
+        return
+
+    user_id = int(user_id_str)
+
+    await callback.message.edit_text(
+        callback.message.html_text + "\n\n❌ <b>Отклонено</b>",
+        parse_mode="HTML",
+    )
+
+    try:
+        await callback.bot.send_message(user_id, "❌ В доступе отказано.")
+    except Exception as e:
+        logger.warning(f"Failed to notify user {user_id} about rejection: {e}")
+
+    await callback.answer("❌ Отклонено")
