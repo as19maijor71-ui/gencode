@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LENGTH = 4096
 
+def _parse_whitelist() -> set[int]:
+    raw = settings.WHITELIST_USERS.strip()
+    if not raw:
+        return set()
+    return {int(uid.strip()) for uid in raw.split(",") if uid.strip().isdigit()}
+
 _storage_instance: SQLiteStorage | None = None
 
 
@@ -77,6 +83,11 @@ def _safe_send(text: str) -> list[str]:
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
     logger.info("User %d (@%s) started the bot", message.from_user.id, message.from_user.username or "?")
+
+    whitelist = _parse_whitelist()
+    if whitelist and message.from_user.id not in whitelist:
+        await message.answer("🔒 Доступ ограничен. Бот в закрытом тестировании.")
+        return
 
     current_state = await state.get_state()
     if current_state == CardFlow.generating:

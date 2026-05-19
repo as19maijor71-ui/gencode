@@ -35,5 +35,7 @@ class Settings(BaseSettings):
 
     ADMIN_USER_ID: int = 0
 
+    WHITELIST_USERS: str = ""  # comma-separated Telegram user IDs, empty = open for all
+
 
 settings = Settings()
