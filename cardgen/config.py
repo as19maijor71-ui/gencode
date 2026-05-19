@@ -33,5 +33,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_MAX: int = 3
     RATE_LIMIT_WINDOW: int = 60
 
+    ADMIN_USER_ID: int = 0
+
 
 settings = Settings()

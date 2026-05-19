@@ -76,6 +76,8 @@ def _safe_send(text: str) -> list[str]:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
+    logger.info("User %d (@%s) started the bot", message.from_user.id, message.from_user.username or "?")
+
     current_state = await state.get_state()
     if current_state == CardFlow.generating:
         await message.answer("⏳ Генерация уже идёт. Подожди, пожалуйста.")
@@ -256,6 +258,16 @@ async def _do_generate(message: Message, state: FSMContext, competitor_input: st
     data = await state.get_data()
     description: str = data.get("description", "")
     category_key: str = data.get("category", "clothing")
+    logger.info("User %d generating card — category: %s, competitor: %s",
+                user_id, category_key, "yes" if competitor_input else "no")
+
+    if _storage_instance is not None:
+        _storage_instance.log_generation(
+            user_id,
+            message.from_user.username,
+            category_key,
+            bool(competitor_input),
+        )
 
     if not description:
         await message.answer("⚠️ Описание товара не найдено. Начни заново: /start")
@@ -510,3 +522,49 @@ async def send_results(message: Message, result: CardResult, competitor_analysis
             except Exception as e:
                 logger.warning(f"Failed to send competitor chunk with HTML: {e}")
                 await message.answer(_escape(chunk))
+
+
+@router.message(Command("myid"))
+async def cmd_myid(message: Message) -> None:
+    await message.answer(f"Твой Telegram ID: <code>{message.from_user.id}</code>", parse_mode="HTML")
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    if settings.ADMIN_USER_ID and message.from_user.id != settings.ADMIN_USER_ID:
+        await message.answer("⛔ Эта команда только для администратора.")
+        return
+
+    if _storage_instance is None:
+        await message.answer("⚠️ Хранилище недоступно.")
+        return
+
+    rows = _storage_instance.get_recent_activity(limit=30)
+    if not rows:
+        await message.answer("📊 Пока нет данных о генерациях.")
+        return
+
+    users: dict[int, list] = {}
+    total = 0
+    with_competitor = 0
+    for r in rows:
+        uid = r["user_id"]
+        if uid not in users:
+            users[uid] = []
+        users[uid].append(r)
+        total += 1
+        if r["has_competitor"]:
+            with_competitor += 1
+
+    lines = [f"📊 <b>Активность за 7 дней</b>\n"]
+    lines.append(f"Всего генераций: {total} (с конкурентом: {with_competitor})")
+    lines.append(f"Уникальных пользователей: {len(users)}\n")
+
+    for uid, recs in users.items():
+        username = recs[0].get("username") or f"ID:{uid}"
+        cats = [r["category"] for r in recs]
+        last = recs[0]["created_at"]
+        lines.append(f"👤 @{username} — {len(recs)} генераций, последняя: {last}")
+        lines.append(f"   Категории: {', '.join(cats[:5])}")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")

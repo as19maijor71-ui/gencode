@@ -44,6 +44,16 @@ class SQLiteStorage(BaseStorage):
             ")"
         )
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS generation_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "username TEXT, "
+            "category TEXT, "
+            "has_competitor INTEGER NOT NULL DEFAULT 0, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now'))"
+            ")"
+        )
+        conn.execute(
             f"DELETE FROM fsm_states WHERE updated_at < datetime('now', '-{self.fsm_ttl} seconds')"
         )
         conn.execute(
@@ -112,6 +122,26 @@ class SQLiteStorage(BaseStorage):
             self._conn.close()
             self._conn = None
             logger.info("SQLiteStorage connection closed")
+
+    def log_generation(self, user_id: int, username: str | None, category: str, has_competitor: bool) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO generation_log (user_id, username, category, has_competitor) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, username or "", category, 1 if has_competitor else 0),
+        )
+        conn.commit()
+
+    def get_recent_activity(self, limit: int = 20) -> list[dict]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT user_id, username, category, has_competitor, created_at "
+            "FROM generation_log "
+            "WHERE created_at > datetime('now', '-7 days') "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def put_copy(self, key: str, text: str) -> None:
         conn = self._get_conn()
