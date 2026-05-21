@@ -179,6 +179,13 @@ class SQLiteStorage(BaseStorage):
         conn.execute("DELETE FROM whitelist WHERE user_id = ?", (user_id,))
         conn.commit()
 
+    def get_whitelist_users(self) -> list[dict]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT user_id, username, created_at FROM whitelist ORDER BY created_at DESC LIMIT 50"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def put_copy(self, key: str, text: str) -> None:
         conn = self._get_conn()
         conn.execute(

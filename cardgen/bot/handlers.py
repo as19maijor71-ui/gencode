@@ -557,33 +557,27 @@ async def cmd_stats(message: Message) -> None:
         await message.answer("⚠️ Хранилище недоступно.")
         return
 
-    rows = _storage_instance.get_recent_activity(limit=30)
-    if not rows:
-        await message.answer("📊 Пока нет данных о генерациях.")
-        return
+    wl_users = _storage_instance.get_whitelist_users()
+    gen_rows = _storage_instance.get_recent_activity(limit=30)
 
-    users: dict[int, list] = {}
-    total = 0
-    with_competitor = 0
-    for r in rows:
-        uid = r["user_id"]
-        if uid not in users:
-            users[uid] = []
-        users[uid].append(r)
-        total += 1
-        if r["has_competitor"]:
-            with_competitor += 1
+    lines = ["📊 <b>Статистика</b>\n"]
 
-    lines = [f"📊 <b>Активность за 7 дней</b>\n"]
-    lines.append(f"Всего генераций: {total} (с конкурентом: {with_competitor})")
-    lines.append(f"Уникальных пользователей: {len(users)}\n")
+    lines.append(f"<b>Доступ открыт:</b> {len(wl_users)} чел.")
+    for wl in wl_users:
+        uid = wl["user_id"]
+        username = wl.get("username") or f"ID:{uid}"
+        user_gens = [r for r in gen_rows if r["user_id"] == uid]
+        status = f"✅ {len(user_gens)} ген." if user_gens else "⏳ не пользовался"
+        lines.append(f"  • @{username} — {status}")
 
-    for uid, recs in users.items():
-        username = recs[0].get("username") or f"ID:{uid}"
-        cats = [r["category"] for r in recs]
-        last = recs[0]["created_at"]
-        lines.append(f"👤 @{username} — {len(recs)} генераций, последняя: {last}")
-        lines.append(f"   Категории: {', '.join(cats[:5])}")
+    recent_users = {r["user_id"] for r in gen_rows}
+    total = len(gen_rows)
+    with_comp = sum(1 for r in gen_rows if r["has_competitor"])
+
+    lines.append(f"\nГенераций за 7 дней: {total} (с конкурентом: {with_comp})")
+
+    if total == 0 and len(wl_users) == 0:
+        lines = ["📊 Пока нет данных."]
 
     await message.answer("\n".join(lines), parse_mode="HTML")
 
