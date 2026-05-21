@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import html
 import logging
 import time
@@ -597,6 +598,8 @@ async def access_request(callback: CallbackQuery) -> None:
     username = callback.from_user.username or ""
     full_name = callback.from_user.full_name or ""
 
+    encoded = base64.b64encode(username.encode()).decode()
+
     admin_id = settings.ADMIN_USER_ID
     if not admin_id:
         await callback.answer("⚠️ Администратор не настроен")
@@ -607,7 +610,7 @@ async def access_request(callback: CallbackQuery) -> None:
             [
                 InlineKeyboardButton(
                     text="✅ Одобрить",
-                    callback_data=f"wl_approve:{user_id}"
+                    callback_data=f"wl_approve:{user_id}:{encoded}"
                 ),
                 InlineKeyboardButton(
                     text="❌ Отклонить",
@@ -647,15 +650,22 @@ async def approve_access(callback: CallbackQuery) -> None:
         await callback.answer("⛔ Нет прав")
         return
 
-    user_id_str = callback.data.split(":", 1)[1]
-    if not user_id_str.isdigit():
+    parts = callback.data.split(":")  # wl_approve:user_id[:encoded_username]
+    if len(parts) < 2 or not parts[1].isdigit():
         await callback.answer("⚠️ Некорректный ID")
         return
 
-    user_id = int(user_id_str)
+    user_id = int(parts[1])
+    username = ""
+    if len(parts) >= 3:
+        try:
+            username = base64.b64decode(parts[2]).decode()
+        except Exception:
+            pass
+
     _storage_instance.add_to_whitelist(
         user_id,
-        callback.from_user.username or "",
+        username,
         callback.from_user.id,
     )
 
