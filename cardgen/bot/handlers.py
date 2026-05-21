@@ -566,11 +566,16 @@ async def cmd_stats(message: Message) -> None:
     lines.append(f"<b>Доступ открыт:</b> {len(wl_users)} чел.")
     for wl in wl_users:
         uid = wl["user_id"]
-        uname = wl.get("username") or ""
-        if uname == "admin" or (settings.ADMIN_USER_ID and uid != settings.ADMIN_USER_ID and uname):
-            display = f"ID:{uid}"
+        full_name = wl.get("full_name") or ""
+        username = wl.get("username") or ""
+        if uid == settings.ADMIN_USER_ID:
+            display = "👑 Организатор"
+        elif full_name:
+            display = full_name
+        elif username and username != "admin":
+            display = f"@{username}"
         else:
-            display = f"@{uname}"
+            display = f"ID:{uid}"
         user_gens = [r for r in gen_rows if r["user_id"] == uid]
         status = f"✅ {len(user_gens)} ген." if user_gens else "⏳ не пользовался"
         lines.append(f"  • {display} — {status}")
@@ -603,6 +608,7 @@ async def access_request(callback: CallbackQuery) -> None:
     full_name = callback.from_user.full_name or ""
 
     encoded = base64.b64encode(username.encode()).decode()
+    encoded_fn = base64.b64encode(full_name.encode()).decode()
 
     admin_id = settings.ADMIN_USER_ID
     if not admin_id:
@@ -614,7 +620,7 @@ async def access_request(callback: CallbackQuery) -> None:
             [
                 InlineKeyboardButton(
                     text="✅ Одобрить",
-                    callback_data=f"wl_approve:{user_id}:{encoded}"
+                    callback_data=f"wl_approve:{user_id}:{encoded}:{encoded_fn}"
                 ),
                 InlineKeyboardButton(
                     text="❌ Отклонить",
@@ -661,15 +667,22 @@ async def approve_access(callback: CallbackQuery) -> None:
 
     user_id = int(parts[1])
     username = ""
+    full_name = ""
     if len(parts) >= 3:
         try:
             username = base64.b64decode(parts[2]).decode()
+        except Exception:
+            pass
+    if len(parts) >= 4:
+        try:
+            full_name = base64.b64decode(parts[3]).decode()
         except Exception:
             pass
 
     _storage_instance.add_to_whitelist(
         user_id,
         username,
+        full_name,
         callback.from_user.id,
     )
 

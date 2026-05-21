@@ -58,10 +58,17 @@ class SQLiteStorage(BaseStorage):
             "CREATE TABLE IF NOT EXISTS whitelist ("
             "user_id INTEGER PRIMARY KEY, "
             "username TEXT, "
+            "full_name TEXT DEFAULT '', "
             "approved_by INTEGER, "
             "created_at TEXT NOT NULL DEFAULT (datetime('now'))"
             ")"
         )
+        try:
+            conn.execute(
+                "ALTER TABLE whitelist ADD COLUMN full_name TEXT DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass
         conn.execute(
             f"DELETE FROM fsm_states WHERE updated_at < datetime('now', '-{self.fsm_ttl} seconds')"
         )
@@ -70,14 +77,9 @@ class SQLiteStorage(BaseStorage):
         )
         if self.admin_id:
             conn.execute(
-                "INSERT OR IGNORE INTO whitelist (user_id, username, approved_by) "
-                "VALUES (?, ?, ?)",
-                (self.admin_id, "admin", self.admin_id),
-            )
-            conn.execute(
-                "UPDATE whitelist SET username = '' "
-                "WHERE user_id != ? AND username != '' AND username != 'admin'",
-                (self.admin_id,),
+                "INSERT OR IGNORE INTO whitelist (user_id, username, full_name, approved_by) "
+                "VALUES (?, ?, ?, ?)",
+                (self.admin_id, "admin", "Организатор", self.admin_id),
             )
         conn.commit()
         logger.info("SQLiteStorage initialized at %s", self.db_path)
@@ -170,12 +172,12 @@ class SQLiteStorage(BaseStorage):
         ).fetchone()
         return row is not None
 
-    def add_to_whitelist(self, user_id: int, username: str, approved_by: int) -> None:
+    def add_to_whitelist(self, user_id: int, username: str, full_name: str, approved_by: int) -> None:
         conn = self._get_conn()
         conn.execute(
-            "INSERT OR IGNORE INTO whitelist (user_id, username, approved_by) "
-            "VALUES (?, ?, ?)",
-            (user_id, username, approved_by),
+            "INSERT OR REPLACE INTO whitelist (user_id, username, full_name, approved_by) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, username, full_name, approved_by),
         )
         conn.commit()
 
@@ -187,7 +189,7 @@ class SQLiteStorage(BaseStorage):
     def get_whitelist_users(self) -> list[dict]:
         conn = self._get_conn()
         rows = conn.execute(
-            "SELECT user_id, username, created_at FROM whitelist ORDER BY created_at DESC LIMIT 50"
+            "SELECT user_id, username, full_name, created_at FROM whitelist ORDER BY created_at DESC LIMIT 50"
         ).fetchall()
         return [dict(r) for r in rows]
 
