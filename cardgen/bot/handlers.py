@@ -566,10 +566,11 @@ async def cmd_stats(message: Message) -> None:
     lines.append(f"<b>Доступ открыт:</b> {len(wl_users)} чел.")
     for wl in wl_users:
         uid = wl["user_id"]
-        username = wl.get("username") or f"ID:{uid}"
+        uname = wl.get("username") or ""
+        display = f"@{uname}" if uname and uname not in ("", "admin") else f"ID:{uid}"
         user_gens = [r for r in gen_rows if r["user_id"] == uid]
         status = f"✅ {len(user_gens)} ген." if user_gens else "⏳ не пользовался"
-        lines.append(f"  • @{username} — {status}")
+        lines.append(f"  • {display} — {status}")
 
     recent_users = {r["user_id"] for r in gen_rows}
     total = len(gen_rows)
