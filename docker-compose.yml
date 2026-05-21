@@ -8,3 +8,4 @@ services:
       - .env
     volumes:
       - ./cardgen/data:/app/cardgen/data
+      - ./cardgen:/app/cardgen
