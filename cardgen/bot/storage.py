@@ -74,6 +74,11 @@ class SQLiteStorage(BaseStorage):
                 "VALUES (?, ?, ?)",
                 (self.admin_id, "admin", self.admin_id),
             )
+            conn.execute(
+                "UPDATE whitelist SET username = '' "
+                "WHERE user_id != ? AND username != '' AND username != 'admin'",
+                (self.admin_id,),
+            )
         conn.commit()
         logger.info("SQLiteStorage initialized at %s", self.db_path)
 

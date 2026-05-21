@@ -567,7 +567,10 @@ async def cmd_stats(message: Message) -> None:
     for wl in wl_users:
         uid = wl["user_id"]
         uname = wl.get("username") or ""
-        display = f"@{uname}" if uname and uname not in ("", "admin") else f"ID:{uid}"
+        if uname == "admin" or (settings.ADMIN_USER_ID and uid != settings.ADMIN_USER_ID and uname):
+            display = f"ID:{uid}"
+        else:
+            display = f"@{uname}"
         user_gens = [r for r in gen_rows if r["user_id"] == uid]
         status = f"✅ {len(user_gens)} ген." if user_gens else "⏳ не пользовался"
         lines.append(f"  • {display} — {status}")
